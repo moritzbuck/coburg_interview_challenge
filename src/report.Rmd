@@ -111,8 +111,8 @@ ggplot(fulldata[total_claim_amount >0], aes(x=avg_claim_amount, y=..density..))+
 ```
 Claim amounts seam very consistent.
 
-```{r additional, fig.width = 5, fig_height = 6}
-table(fulldata$nb_claims
+```{r additional2, fig.width = 5, fig_height = 6}
+table(fulldata$nb_claims)
 ```
 
 Most insurances have made no claims and very few more than 3.
