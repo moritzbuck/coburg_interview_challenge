@@ -1,0 +1,211 @@
+---
+title: Coding Challenge --- Data Scientist
+author: Moritz Buck
+output: html_document
+---
+
+
+# Coding Challenge --- Data Scientist
+
+
+# Load packages
+
+Most packages where installed with conda, only the `arff`-parser needs to be installed manually
+
+```{r}
+library(ggplot2)
+library(data.table)
+library(maps)
+library(tidyr)
+library(dplyr)
+library(ggpubr)
+library(farff)
+library(pheatmap)
+library(MASS)
+
+if (!require("farff", quietly = TRUE))
+    install.packages("farff", repos = "https://mirror.accum.se/mirror/CRAN/")
+    
+```
+
+# Load data
+
+```{r, message=FALSE}
+data = as.data.table(readARFF("/home/moritz/projects/X003_coburg/data/freMTPL2freq.arff"))
+var = as.data.table(readARFF("/home/moritz/projects/X003_coburg/data/freMTPL2sev.arff"))
+census_data = as.data.table(read.csv('/home/moritz/projects/X003_coburg/data/census_data.csv', header = TRUE, sep = ','))
+```
+
+# joining and summarizing
+
+```{r}
+svar = var[, .(total_claim_amount = sum(ClaimAmount), avg_claim_amount = mean(ClaimAmount), nb_claims = length(ClaimAmount)),  by = IDpol]
+
+fulldata = data %>% left_join(svar, by = c('IDpol' = 'IDpol'))
+fulldata[is.na(total_claim_amount) , total_claim_amount := 0]
+fulldata[is.na(avg_claim_amount) , avg_claim_amount := 0]
+fulldata[is.na(nb_claims) , nb_claims := 0]
+```
+
+#  checking for autocorrelation
+
+```{r heatmap}
+cont_columns = c("ClaimNb", "Exposure", "VehPower", "VehAge", "DrivAge", "BonusMalus", "Density", "total_claim_amount", "avg_claim_amount", "nb_claims")
+cat_cols = setdiff(colnames(fulldata) , cont_columns) [2:5]
+
+pheatmap(cor(fulldata[,..cont_columns]))
+
+```
+
+ClaimNbs and nb_claims are obviously correlated, but weirdly not the same, I guess the difference is the claims reported and claims processed, I will use only nb_claims (the number of claims computed from `freMTPL2sev.arff` for each insurance ID).
+
+Also, obviously, total_claim amount correlates with avg_claim_amount as most insurances only have one claim.  Similarily nb_claims and claim amounts correlate. As well as correlates with nb_claim (and claim amounts).
+
+BonusMalus relates driver age, and exposure, as BonusMalus in France mainly depends on how long one was insured. I would remove it from modelling as it is probably a composite factor of the others.
+
+# Exploring the data a bit
+
+```{r maps, fig.width = 12, fig_height = 8, message=FALSE}
+by_region = fulldata[,.(avg_nb_claims = mean(nb_claims), mean_bonus_malus = mean(BonusMalus), mean_driver_age = mean(DrivAge), mean_veh_age = mean(VehAge), mean_veh_power = mean(VehPower), mean_density = mean(Density)) , by = Region]
+by_region[, Region := sub("R","", Region)]
+
+by_region = by_region %>% left_join(census_data, by = c('Region' = 'code'))
+
+maps_facts = c("avg_nb_claims", "mean_driver_age", "mean_veh_age", "mean_veh_power", "mean_density", "mean_bonus_malus")
+
+maps = lapply(maps_facts, function(x) map_data('france') %>%
+  left_join(by_region, by = c('region' = 'name')) %>%
+  ggplot(aes_string(x = "long", y = "lat", group = "group", fill = x)) +
+  geom_polygon(color = '#555555', linewidth = .25) +
+  coord_map() +
+  scale_fill_gradient(low = "white", high = '#00a67d', na.value="#999999")+
+  theme_void()+ggtitle(x)
+  )
+
+ggarrange(plotlist = maps, ncol=3, nrow=2)
+```
+
+
+```{r categ, fig.width = 14, fig_height = 6,}
+bar_facts = c("Area", "VehBrand", "VehGas")
+
+bars = lapply(bar_facts, function(x)
+     ggplot(fulldata[avg_claim_amount > 0], aes_string(x=x, y="avg_claim_amount"))+geom_boxplot()+scale_y_log10()+ggtitle(x)
+     )
+
+ggarrange(plotlist = bars , ncol=3, nrow=1)
+```
+
+```{r, fig.width = 14, fig_height = 6}
+xy_facts = c("VehPower", "VehAge", "DrivAge")
+
+xys = lapply(xy_facts, function(x)
+     ggplot(fulldata[avg_claim_amount > 0], aes_string(x=x, y="avg_claim_amount"))+geom_point()+scale_y_log10()+geom_smooth(col="red")+ggtitle(x)
+     )
+
+ggarrange(plotlist = xys, ncol=3, nrow=1)
+```
+
+```{r additional, fig.width = 5, fig_height = 6}
+ggplot(fulldata[total_claim_amount >0], aes(x=avg_claim_amount, y=..density..))+geom_histogram(bins=100, fill="grey", alpha=0.7)+geom_density(col="red")+scale_x_log10()
+```
+Claim amounts seam very consistent.
+
+```{r additional, fig.width = 5, fig_height = 6}
+table(fulldata$nb_claims
+```
+
+Most insurances have made no claims and very few more than 3.
+
+
+
+## Modelling
+
+We will split the  modelling into two parts, the risk, as in the probability of getting into an accident during a year, and a second model estimating the value of the damage.
+
+### Risk estimate
+
+Subsetting the data to insurances that were running at least 90% of a year:
+
+```{r subset}
+sub_data = fulldata[Exposure > 0.9]
+nrow(sub_data)/nrow(fulldata)
+```
+
+Running a full model with a negative binomial regression
+```{r fullmodel}
+modelling_frequency = glm.nb(nb_claims ~ Area+VehPower+VehGas+VehAge+DrivAge+VehBrand+Density+Region,data=sub_data)
+summary(modelling_frequency)
+anova(modelling_frequency)
+```
+
+We will keep the full model for now.
+
+### Risk estimate
+
+Modelling the value of the damage with a Gamma dsitribution, keeping only factors relevant for the vehicle.
+
+```{r}
+
+modelling_damageprice = glm(avg_claim_amount ~ BonusMalus+VehPower+VehGas+VehAge+VehBrand,family=Gamma(link = "log"),data=sub_data[nb_claims >0])
+anova(modelling_damageprice)
+
+```
+
+Some factors seam irrelevant, a alternate models are tried:
+
+```{r}
+
+nogas <- update(modelling_damageprice, . ~ . - VehGas)
+anova(modelling_damageprice, nogas)
+noage <- update(modelling_damageprice, . ~ . - VehAge)
+anova(modelling_damageprice, noage)
+nopow <- update(modelling_damageprice, . ~ . - VehPower)
+anova(modelling_damageprice, nopow)
+onlypow <- update(modelling_damageprice, . ~ . - VehAge - VehGas)
+onlybrand <- update(modelling_damageprice, . ~ . - VehPower - VehAge - VehGas)
+anova(onlypow, onlybrand)
+
+```
+
+We will only keep Brand, BonusMalus and Power (power is a bit borderline....).
+
+```{r}
+
+modelling_damageprice = glm(avg_claim_amount ~ BonusMalus+VehPower+VehBrand,family=Gamma(link = "log"),data=sub_data[nb_claims >0])
+summary(modelling_damageprice)
+anova(modelling_damageprice)
+
+```
+
+Let't fit the subset to the model:
+
+```{r subsetfit}
+
+fitted_subset <- predict(modelling_frequency,newdata=sub_data,type='response')
+fitted_cost <- predict(modelling_damageprice,newdata=sub_data,type='response')
+fiti = sub_data[, .(expected_claim_per_year = fitted_subset, measured_claim_per_year = nb_claims, expected_cost_per_claim = fitted_cost, measured_cost_perclaim = avg_claim_amount)]
+fiti[,pricing_per_year := expected_cost_per_claim*expected_claim_per_year]
+
+ggplot(fiti[measured_claim_per_year < 5], aes(y=pricing_per_year, x=factor(measured_claim_per_year)))+geom_violin()+geom_boxplot(width = 0.2)+geom_smooth(mapping = aes(x=measured_claim_per_year, y=pricing_per_year), method = "lm", col="red", lwd =0.4)
+
+# return on cost
+sum(fiti$pricing_per_year)/sum(fiti$measured_claim_per_year*fiti$measured_cost_perclaim)+xlim(0,4)
+
+```
+
+Let't fit the fullset of the data:
+
+```{r fullfit}
+
+full_fitted_subset <- predict(modelling_frequency,newdata=fulldata,type='response')
+full_fitted_cost <- predict(modelling_damageprice,newdata=fulldata,type='response')
+full_fiti = fulldata[, .(expected_claim_per_year = full_fitted_subset, measured_claim_per_year = nb_claims, expected_cost_per_claim = full_fitted_cost, measured_cost_perclaim = avg_claim_amount)]
+full_fiti[,pricing_per_year := expected_cost_per_claim*expected_claim_per_year]
+
+ggplot(full_fiti[measured_claim_per_year < 5], aes(y=pricing_per_year, x=factor(measured_claim_per_year)))+geom_violin()+geom_boxplot(width = 0.2)+geom_smooth(mapping = aes(x=measured_claim_per_year, y=pricing_per_year), method = "lm", col="red", lwd =0.4)
+
+# return on cost
+
+sum(full_fiti$pricing_per_year)/sum(full_fiti$measured_claim_per_year*full_fiti$measured_cost_perclaim)
+```
