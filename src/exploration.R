@@ -1,3 +1,5 @@
+## Scraps of code written to explore the data and modeling, somwhat solidified in `report.Rmd`
+
 # Load packages
 
 library(ggplot2)
@@ -6,12 +8,12 @@ library(maps)
 library(tidyr)
 library(dplyr)
 library(ggpubr)
-library(farff)
 library(pheatmap)
 
 if (!require("farff", quietly = TRUE))
     install.packages("farff")
 
+library(farff)
 
 # Load data
 
@@ -196,3 +198,7 @@ full.fiti = fulldata[, .(expected_claim_per_year = full.fitted.results, measured
 
 full.fiti[,pricing_per_year := expected_cost_per_claim*expected_claim_per_year]
 
+
+## Code
+
+Full code of this report available on [github](https://github.com/moritzbuck/coburg_interview_challenge), generated using the [init.sh](https://github.com/moritzbuck/coburg_interview_challenge/blob/main/src/init.sh)-script, which should work out of the box if conda and mamba are installed.
